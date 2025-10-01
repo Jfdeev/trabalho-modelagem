@@ -307,6 +307,11 @@ def load_data():
     try:
         df = pd.read_csv('dataset.csv')
 
+        # Verificar se há colunas duplicadas e remover
+        if df.columns.duplicated().any():
+            st.warning("Colunas duplicadas detectadas no dataset. Removendo automaticamente...")
+            df = df.loc[:, ~df.columns.duplicated()]
+
         # Mapeamento de colunas para nomes mais intuitivos
         column_mapping = {
             'Gls': 'Goals',
@@ -316,17 +321,29 @@ def load_data():
             '90s': 'Ninety_Minutes',
             'G+A': 'Goals_Assists',
             'xG': 'Expected_Goals',
-            'xAG': 'Expected_Assists'
+            'xAG': 'Expected_Assists',
+            'CrdY': 'Yellow_Cards',
+            'CrdR': 'Red_Cards',
+            'PK': 'Penalty_Goals',
+            'PKatt': 'Penalty_Attempts',
+            'PKM': 'Penalty_Missed'
         }
 
-        # Renomear colunas se existirem
-        for old_name, new_name in column_mapping.items():
-            if old_name in df.columns:
-                df[new_name] = df[old_name]
+        # Aplicar mapeamento apenas para colunas que existem
+        existing_mappings = {old: new for old, new in column_mapping.items() if old in df.columns}
+        df = df.rename(columns=existing_mappings)
 
-        # Tratamento avançado de valores ausentes
+        # Tratamento de valores ausentes
         numeric_columns = df.select_dtypes(include=[np.number]).columns
-        df[numeric_columns] = df[numeric_columns].fillna(df[numeric_columns].median())
+        for col in numeric_columns:
+            if df[col].isnull().sum() > 0:
+                df[col] = df[col].fillna(df[col].median())
+
+        # Limpeza de dados categóricos
+        categorical_columns = df.select_dtypes(include=['object']).columns
+        for col in categorical_columns:
+            if df[col].isnull().sum() > 0:
+                df[col] = df[col].fillna('Unknown')
 
         # Engenharia de variáveis aprimorada
         if 'Goals' in df.columns and 'Minutes' in df.columns:
@@ -338,32 +355,89 @@ def load_data():
         if 'Goals' in df.columns and 'Assists' in df.columns:
             df['Total_Contributions'] = df['Goals'] + df['Assists']
 
-        if 'Shots' in df.columns and 'Goals' in df.columns:
-            df['Conversion_Rate'] = np.where(df['Shots'] > 0, df['Goals'] / df['Shots'], 0)
-
         if 'Expected_Goals' in df.columns and 'Goals' in df.columns:
-            df['Goal_Efficiency'] = np.where(df['Expected_Goals'] > 0, df['Goals'] / df['Expected_Goals'], 0)
+            df['Goal_Efficiency'] = np.where(df['Expected_Goals'] > 0, df['Goals'] / df['Expected_Goals'], 1)
             df['Goal_Difference'] = df['Goals'] - df['Expected_Goals']
 
         # Variável de performance composta
         if all(col in df.columns for col in ['Goals', 'Assists', 'Minutes']):
-            df['Performance_Index'] = (
-                (df['Goals'] * 3 + df['Assists'] * 2) *
-                np.log1p(df['Minutes'] / 90)
-            )
+            # Normalizar minutos para evitar valores extremos
+            minutes_normalized = np.clip(df['Minutes'] / 90, 0.1, 50)  # Min 0.1, Max 50 jogos
+            df['Performance_Index'] = (df['Goals'] * 3 + df['Assists'] * 2) * np.log1p(minutes_normalized)
 
-        # Classificação de jogadores
+        # Classificação de jogadores por gols
         if 'Goals' in df.columns:
             df['Goal_Category'] = pd.cut(
                 df['Goals'],
-                bins=[0, 2, 5, 10, float('inf')],
-                labels=['Low', 'Medium', 'High', 'Elite']
+                bins=[-0.1, 0, 2, 5, 10, float('inf')],
+                labels=['Zero', 'Low', 'Medium', 'High', 'Elite'],
+                include_lowest=True
             )
 
+        # Filtrar apenas jogadores com dados mínimos de qualidade
+        min_minutes = 50  # Jogadores com pelo menos ~0.5 jogos de 90min
+        if 'Minutes' in df.columns:
+            df = df[df['Minutes'] >= min_minutes].copy()
+
+        # Resetar índice após filtragem
+        df = df.reset_index(drop=True)
+
+        st.success(f"Dataset carregado: {len(df)} jogadores com dados válidos")
         return df
 
+    except FileNotFoundError:
+        st.error("Arquivo 'dataset.csv' não encontrado. Verifique se o arquivo está no diretório correto.")
+        return None
     except Exception as e:
-        st.error(f"❌ Erro ao carregar dados: {e}")
+        st.error(f"Erro ao carregar dados: {str(e)}")
+        return None
+
+@st.cache_data
+def calculate_correlation_matrix(df, columns):
+    """Calcula matriz de correlação com cache para performance"""
+    try:
+        return df[columns].corr()
+    except Exception as e:
+        st.warning(f"Erro ao calcular correlações: {e}")
+        return pd.DataFrame()
+
+@st.cache_data
+def get_descriptive_stats(df, columns):
+    """Calcula estatísticas descritivas com cache"""
+    try:
+        return df[columns].describe()
+    except Exception as e:
+        st.warning(f"Erro ao calcular estatísticas: {e}")
+        return pd.DataFrame()
+
+@st.cache_data
+def train_linear_model(X_train, y_train, X_test, y_test):
+    """Treina modelo linear com cache para evitar retreinamento desnecessário"""
+    try:
+        model = LinearRegression()
+        model.fit(X_train, y_train)
+
+        # Predições
+        y_pred_train = model.predict(X_train)
+        y_pred_test = model.predict(X_test)
+
+        # Métricas
+        r2_train = r2_score(y_train, y_pred_train)
+        r2_test = r2_score(y_test, y_pred_test)
+        rmse_test = np.sqrt(mean_squared_error(y_test, y_pred_test))
+        mae_test = mean_absolute_error(y_test, y_pred_test)
+
+        return {
+            'model': model,
+            'y_pred_train': y_pred_train,
+            'y_pred_test': y_pred_test,
+            'r2_train': r2_train,
+            'r2_test': r2_test,
+            'rmse_test': rmse_test,
+            'mae_test': mae_test
+        }
+    except Exception as e:
+        st.error(f"Erro no treinamento do modelo: {e}")
         return None
 
 def show_overview(df):
@@ -372,7 +446,7 @@ def show_overview(df):
     # Header principal com animação
     st.markdown("""
     <div class="fade-in">
-        <h1>🏆 ANÁLISE PREMIER LEAGUE 2023/24</h1>
+        <h1>ANÁLISE PREMIER LEAGUE 2023/24</h1>
         <center><em>Decodificando o futebol através dos dados</em></center>
     </div>
     """, unsafe_allow_html=True)
@@ -384,7 +458,7 @@ def show_overview(df):
         st.markdown(f"""
         <div class="big-metric fade-in">
             <h1>{len(df)}</h1>
-            <p>⚽ Jogadores Analisados</p>
+            <p>Jogadores Analisados</p>
         </div>
         """, unsafe_allow_html=True)
 
@@ -402,7 +476,7 @@ def show_overview(df):
         st.markdown(f"""
         <div class="big-metric fade-in">
             <h1>{total_assists}</h1>
-            <p>🎯 Assistências Totais</p>
+            <p>Assistências Totais</p>
         </div>
         """, unsafe_allow_html=True)
 
@@ -411,7 +485,7 @@ def show_overview(df):
         st.markdown(f"""
         <div class="big-metric fade-in">
             <h1>{unique_positions}</h1>
-            <p>📊 Posições Únicas</p>
+            <p>Posições Únicas</p>
         </div>
         """, unsafe_allow_html=True)
 
@@ -422,7 +496,7 @@ def show_overview(df):
 
     with col1:
         if 'Goals' in df.columns:
-            st.subheader("📊 Distribuição de Gols")
+            st.subheader("Distribuição de Gols")
 
             # Histograma interativo
             fig = px.histogram(
@@ -507,7 +581,7 @@ def show_overview(df):
         # Insights automáticos
         st.markdown("""
         <div class="insight-box">
-            <h3>💡 Insights Automáticos</h3>
+            <h3>Insights Automáticos</h3>
         """, unsafe_allow_html=True)
 
         for var in selected_vars:
@@ -523,16 +597,16 @@ def show_overview(df):
                 else:
                     variability = "baixa variabilidade"
 
-                st.markdown(f"• **{var}**: Média de {mean_val:.2f} com {variability} (CV: {cv:.1f}%)")
+                st.markdown(f"• {var}: Média de {mean_val:.2f} com {variability} (CV: {cv:.1f}%)")
 
         st.markdown("</div>", unsafe_allow_html=True)
 
 def show_exploratory_analysis(df):
     """Análise exploratória com recursos avançados e interativos"""
-    st.header("🔍 Análise Exploratória Avançada")
+    st.header("Análise Exploratória Avançada")
 
     # Filtros interativos no topo
-    st.subheader("🎛️ Controles de Análise")
+    st.subheader("Controles de Análise")
 
     col1, col2, col3 = st.columns(3)
 
@@ -545,7 +619,7 @@ def show_exploratory_analysis(df):
 
         if metric_options:
             main_metric = st.selectbox(
-                "📊 Métrica Principal para Análise:",
+                "Métrica Principal para Análise:",
                 metric_options,
                 help="Selecione a métrica que será o foco da análise"
             )
@@ -553,21 +627,15 @@ def show_exploratory_analysis(df):
             main_metric = 'Goals'  # fallback
 
     with col2:
-        # Seletor de número de top performers
-        top_n = st.slider(
-            "🏆 Top N Jogadores:",
-            min_value=5,
-            max_value=20,
-            value=10,
-            help="Quantos top performers mostrar"
-        )
+        # Valor fixo para top performers
+        top_n = 10
 
     with col3:
         # Filtro por categoria de performance
         if 'Goal_Category' in df.columns:
             categories = df['Goal_Category'].cat.categories.tolist()
             selected_categories = st.multiselect(
-                "🎯 Categorias de Performance:",
+                "Categorias de Performance:",
                 categories,
                 default=categories,
                 help="Filtrar jogadores por categoria de gols"
@@ -581,13 +649,13 @@ def show_exploratory_analysis(df):
             df_filtered = df
 
     # Top Performers Avançado
-    st.subheader("🏆 Hall da Fama")
+    st.subheader("Hall da Fama")
 
     col1, col2, col3 = st.columns(3)
 
     with col1:
         if 'Goals' in df_filtered.columns:
-            st.markdown("### ⚽ **Artilheiros**")
+            st.markdown("### Artilheiros")
             top_scorers = df_filtered.nlargest(top_n, 'Goals')[['Player', 'Goals', 'Pos']]
 
             # Gráfico de barras interativo
@@ -607,7 +675,7 @@ def show_exploratory_analysis(df):
 
     with col2:
         if 'Assists' in df_filtered.columns:
-            st.markdown("### 🎯 **Assistentes**")
+            st.markdown("### Assistentes")
             top_assists = df_filtered.nlargest(top_n, 'Assists')[['Player', 'Assists', 'Pos']]
 
             fig = px.bar(
@@ -626,7 +694,7 @@ def show_exploratory_analysis(df):
 
     with col3:
         if main_metric in df_filtered.columns:
-            st.markdown(f"### 💫 **{main_metric}**")
+            st.markdown(f"### 💫 {main_metric}")
             top_metric = df_filtered.nlargest(top_n, main_metric)[['Player', main_metric, 'Pos']]
 
             fig = px.bar(
@@ -677,21 +745,21 @@ def show_exploratory_analysis(df):
         correlations.columns = ['Var1', 'Var2', 'Correlação']
         correlations = correlations.reindex(correlations['Correlação'].abs().sort_values(ascending=False).index)
 
-        st.markdown("### 📈 **Correlações Mais Significativas:**")
+        st.markdown("### Correlações Mais Significativas:")
 
         col1, col2 = st.columns(2)
 
         with col1:
-            st.markdown("**🔥 Correlações Positivas Fortes:**")
+            st.markdown("🔥 Correlações Positivas Fortes:")
             positive_corr = correlations[correlations['Correlação'] > 0.5].head(5)
             for _, row in positive_corr.iterrows():
-                st.markdown(f"• **{row['Var1']}** × **{row['Var2']}**: {row['Correlação']:.3f}")
+                st.markdown(f"• {row['Var1']} × {row['Var2']}: {row['Correlação']:.3f}")
 
         with col2:
-            st.markdown("**❄️ Correlações Negativas Fortes:**")
+            st.markdown("Correlações Negativas Fortes:")
             negative_corr = correlations[correlations['Correlação'] < -0.3].head(5)
             for _, row in negative_corr.iterrows():
-                st.markdown(f"• **{row['Var1']}** × **{row['Var2']}**: {row['Correlação']:.3f}")
+                st.markdown(f"• {row['Var1']} × {row['Var2']}: {row['Correlação']:.3f}")
 
     # Análise por Posição
     if 'Pos' in df_filtered.columns:
@@ -714,13 +782,13 @@ def show_exploratory_analysis(df):
         # Estatísticas por posição
         pos_stats = df_filtered.groupby('Pos')[correlation_vars].mean().round(3)
 
-        st.markdown("### 📊 **Médias por Posição:**")
+        st.markdown("### 📊 Médias por Posição:")
         st.dataframe(pos_stats, use_container_width=True)
 
     # Insights Automáticos
     st.markdown("""
     <div class="success-box">
-        <h3>🤖 Insights Automáticos da Análise</h3>
+        <h3>Insights Automáticos da Análise</h3>
     """, unsafe_allow_html=True)
 
     # Gerar insights baseados nos dados
@@ -729,25 +797,25 @@ def show_exploratory_analysis(df):
         avg_goals = df_filtered['Goals'].mean()
         top_scorer = df_filtered.loc[df_filtered['Goals'].idxmax(), 'Player']
 
-        st.markdown(f"• **Artilheiro**: {top_scorer} com {max_goals} gols ({max_goals/avg_goals:.1f}x a média)")
+        st.markdown(f"• Artilheiro: {top_scorer} com {max_goals} gols ({max_goals/avg_goals:.1f}x a média)")
 
     if len(correlation_vars) >= 2:
         strongest_corr = correlations.iloc[0]
-        st.markdown(f"• **Correlação mais forte**: {strongest_corr['Var1']} × {strongest_corr['Var2']} ({strongest_corr['Correlação']:.3f})")
+        st.markdown(f"• Correlação mais forte: {strongest_corr['Var1']} × {strongest_corr['Var2']} ({strongest_corr['Correlação']:.3f})")
 
     if 'Pos' in df_filtered.columns and main_metric in df_filtered.columns:
         best_position = pos_stats[main_metric].idxmax()
         best_avg = pos_stats.loc[best_position, main_metric]
-        st.markdown(f"• **Posição com melhor {main_metric}**: {best_position} (média: {best_avg:.2f})")
+        st.markdown(f"• Posição com melhor {main_metric}: {best_position} (média: {best_avg:.2f})")
 
     st.markdown("</div>", unsafe_allow_html=True)
 
 def show_statistical_modeling(df):
-    """Modelagem estatística avançada com múltiplos algoritmos"""
-    st.header("📈 Laboratório de Modelagem Estatística")
+    """Modelagem estatística com regressão linear"""
+    st.header("Modelagem Estatística - Regressão Linear")
 
-    # Configurações avançadas de modelagem
-    st.subheader("⚙️ Configurações do Modelo")
+    # Configurações da modelagem
+    st.subheader("Configurações do Modelo")
 
     col1, col2, col3 = st.columns(3)
 
@@ -760,7 +828,7 @@ def show_statistical_modeling(df):
 
         if target_options:
             target_var = st.selectbox(
-                "🎯 Variável Dependente (Y):",
+                "Variável Dependente (Y):",
                 target_options,
                 help="O que queremos prever"
             )
@@ -827,125 +895,86 @@ def show_statistical_modeling(df):
         st.error(f"❌ Erro na preparação dos dados: {e}")
         return
 
-    # Modelagem com múltiplos algoritmos
-    st.subheader("🤖 Comparação de Modelos")
+    # Modelagem com Regressão Linear
+    st.subheader("Regressão Linear")
 
-    models = {
-        'Regressão Linear': LinearRegression(),
-        'Random Forest': RandomForestRegressor(n_estimators=100, random_state=random_state)
-    }
+    try:
+        # Treinar modelo
+        model = LinearRegression()
+        model.fit(X_train, y_train)
 
-    results = {}
-    model_objects = {}
+        # Predições
+        y_pred_train = model.predict(X_train)
+        y_pred_test = model.predict(X_test)
 
-    for name, model in models.items():
-        try:
-            # Treinar modelo
-            model.fit(X_train, y_train)
+        # Métricas
+        r2_train = r2_score(y_train, y_pred_train)
+        r2_test = r2_score(y_test, y_pred_test)
+        rmse_test = np.sqrt(mean_squared_error(y_test, y_pred_test))
+        mae_test = mean_absolute_error(y_test, y_pred_test)
 
-            # Predições
-            y_pred_train = model.predict(X_train)
-            y_pred_test = model.predict(X_test)
+        # Exibir métricas
+        col1, col2, col3 = st.columns(3)
 
-            # Métricas
-            r2_train = r2_score(y_train, y_pred_train)
-            r2_test = r2_score(y_test, y_pred_test)
-            rmse_test = np.sqrt(mean_squared_error(y_test, y_pred_test))
-            mae_test = mean_absolute_error(y_test, y_pred_test)
-
-            results[name] = {
-                'R² Treino': r2_train,
-                'R² Teste': r2_test,
-                'RMSE': rmse_test,
-                'MAE': mae_test,
-                'Predições': y_pred_test
-            }
-
-            model_objects[name] = model
-
-        except Exception as e:
-            st.error(f"❌ Erro no modelo {name}: {e}")
-
-    if not results:
-        st.error("❌ Nenhum modelo foi treinado com sucesso")
-        return
-
-    # Exibir resultados em cards
-    col1, col2 = st.columns(2)
-
-    for i, (name, metrics) in enumerate(results.items()):
-        with col1 if i % 2 == 0 else col2:
+        with col1:
             st.markdown(f"""
             <div class="metric-card">
-                <h3>🤖 {name}</h3>
-                <p><strong>R² Teste:</strong> {metrics['R² Teste']:.3f}</p>
-                <p><strong>RMSE:</strong> {metrics['RMSE']:.3f}</p>
-                <p><strong>MAE:</strong> {metrics['MAE']:.3f}</p>
+                <h3>📊 R² Score</h3>
+                <p><strong>Treino:</strong> {r2_train:.3f}</p>
+                <p><strong>Teste:</strong> {r2_test:.3f}</p>
             </div>
             """, unsafe_allow_html=True)
 
-    # Gráfico comparativo de performance
-    st.subheader("📊 Comparação de Performance")
+        with col2:
+            st.markdown(f"""
+            <div class="metric-card">
+                <h3>📏 RMSE</h3>
+                <p><strong>Teste:</strong> {rmse_test:.3f}</p>
+                <p> (Raiz do Erro Quadrático Médio)</p>
+            </div>
+            """, unsafe_allow_html=True)
 
-    # Gráfico de barras com métricas
-    metrics_df = pd.DataFrame(results).T[['R² Teste', 'RMSE', 'MAE']]
+        with col3:
+            st.markdown(f"""
+            <div class="metric-card">
+                <h3>MAE</h3>
+                <p><strong>Teste:</strong> {mae_test:.3f}</p>
+                <p> (Erro Absoluto Médio)</p>
+            </div>
+            """, unsafe_allow_html=True)
 
-    fig = make_subplots(
-        rows=1, cols=3,
-        subplot_titles=['R² (Maior é Melhor)', 'RMSE (Menor é Melhor)', 'MAE (Menor é Melhor)'],
-        specs=[[{"secondary_y": False}, {"secondary_y": False}, {"secondary_y": False}]]
-    )
+        # Interpretação do modelo
+        quality = "excelente" if r2_test > 0.8 else "boa" if r2_test > 0.6 else "moderada" if r2_test > 0.4 else "fraca"
+        st.markdown(f"""
+        <div class="insight-box">
+            <h4>Interpretação do Modelo</h4>
+            <p>O modelo explica <strong>{r2_test*100:.1f}%</strong> da variabilidade em {target_var}</p>
+            <p>Performance: <strong>{quality}</strong></p>
+            <p>Erro médio: <strong>{mae_test:.2f}</strong> unidades</p>
+        </div>
+        """, unsafe_allow_html=True)
 
-    colors = ['#667eea', '#764ba2']
-
-    for i, metric in enumerate(['R² Teste', 'RMSE', 'MAE']):
-        for j, model_name in enumerate(metrics_df.index):
-            fig.add_trace(
-                go.Bar(
-                    x=[model_name],
-                    y=[metrics_df.loc[model_name, metric]],
-                    name=model_name if i == 0 else "",
-                    marker_color=colors[j],
-                    showlegend=(i == 0)
-                ),
-                row=1, col=i+1
-            )
-
-    fig.update_layout(height=400, title="Comparação de Métricas entre Modelos")
-    st.plotly_chart(fig, use_container_width=True)
-
-    # Melhor modelo
-    best_model_name = max(results.keys(), key=lambda x: results[x]['R² Teste'])
-    best_model = model_objects[best_model_name]
-    best_metrics = results[best_model_name]
-
-    st.markdown(f"""
-    <div class="success-box">
-        <h3>🏆 Melhor Modelo: {best_model_name}</h3>
-        <p><strong>R² Teste:</strong> {best_metrics['R² Teste']:.3f} ({best_metrics['R² Teste']*100:.1f}% da variância explicada)</p>
-        <p><strong>RMSE:</strong> {best_metrics['RMSE']:.3f}</p>
-        <p><strong>MAE:</strong> {best_metrics['MAE']:.3f}</p>
-    </div>
-    """, unsafe_allow_html=True)
+    except Exception as e:
+        st.error(f"❌ Erro no treinamento do modelo: {e}")
+        return
 
     # Gráfico de predições vs reais
-    st.subheader("🎯 Predições vs Valores Reais")
+    st.subheader("Predições vs Valores Reais")
 
     fig = go.Figure()
 
-    for name, metrics in results.items():
-        fig.add_trace(go.Scatter(
-            x=y_test,
-            y=metrics['Predições'],
-            mode='markers',
-            name=name,
-            marker=dict(size=8, opacity=0.7),
-            hovertemplate=f'<b>{name}</b><br>Real: %{{x:.2f}}<br>Predito: %{{y:.2f}}<extra></extra>'
-        ))
+    fig.add_trace(go.Scatter(
+        x=y_test,
+        y=y_pred_test,
+        mode='markers',
+        name='Predições',
+        marker=dict(size=8, opacity=0.7, color='blue'),
+        hovertemplate='<b>Regressão Linear</b><br>Real: %{x:.2f}<br>Predito: %{y:.2f}<extra></extra>'
+    ))
 
     # Linha de predição perfeita
-    min_val = min(y_test.min(), min([m['Predições'].min() for m in results.values()]))
-    max_val = max(y_test.max(), max([m['Predições'].max() for m in results.values()]))
+    min_val = min(y_test.min(), y_pred_test.min())
+    max_val = max(y_test.max(), y_pred_test.max())
 
     fig.add_trace(go.Scatter(
         x=[min_val, max_val],
@@ -964,354 +993,122 @@ def show_statistical_modeling(df):
 
     st.plotly_chart(fig, use_container_width=True)
 
-    # Importância das features (para Random Forest)
-    if 'Random Forest' in model_objects:
-        st.subheader("🌳 Importância das Variáveis (Random Forest)")
+    # Intervalos de confiança
+    st.subheader("📏 Intervalos de Confiança (95%)")
 
-        rf_model = model_objects['Random Forest']
-        importance_df = pd.DataFrame({
-            'Variável': selected_features,
-            'Importância': rf_model.feature_importances_
-        }).sort_values('Importância', ascending=True)
+    try:
+        # Usar statsmodels para intervalos de confiança
+        X_sm = sm.add_constant(X_train)
+        model_sm = sm.OLS(y_train, X_sm).fit()
 
-        fig = px.bar(
-            importance_df,
-            x='Importância',
-            y='Variável',
-            orientation='h',
-            title="Importância das Variáveis no Modelo Random Forest",
-            color='Importância',
-            color_continuous_scale='Viridis'
-        )
+        conf_int = model_sm.conf_int()
+        conf_int.columns = ['Limite Inferior', 'Limite Superior']
+        conf_int.index = ['Intercepto'] + selected_features
 
-        fig.update_layout(height=400)
-        st.plotly_chart(fig, use_container_width=True)
+        # Adicionar coeficientes
+        conf_int['Coeficiente'] = model_sm.params
+        conf_int['P-valor'] = model_sm.pvalues
 
-    # Intervalos de confiança (para regressão linear)
-    if 'Regressão Linear' in model_objects:
-        st.subheader("📏 Intervalos de Confiança (95%) - Regressão Linear")
+        # Filtrar apenas Expected_Goals e variáveis relacionadas a pênaltis (PK)
+        variables_to_show = ['Intercepto']
 
-        try:
-            # Usar statsmodels para intervalos de confiança
-            X_sm = sm.add_constant(X_train)
-            model_sm = sm.OLS(y_train, X_sm).fit()
+        # Adicionar Expected_Goals se estiver nas features selecionadas
+        if 'Expected_Goals' in conf_int.index:
+            variables_to_show.append('Expected_Goals')
 
-            conf_int = model_sm.conf_int()
-            conf_int.columns = ['Limite Inferior', 'Limite Superior']
-            conf_int.index = ['Intercepto'] + selected_features
+        # Adicionar variáveis relacionadas a pênaltis (PK)
+        pk_related = [col for col in conf_int.index if any(keyword in col.upper() for keyword in ['PK', 'PENAL', 'PENALTY'])]
+        variables_to_show.extend(pk_related)
 
-            # Adicionar coeficientes
-            conf_int['Coeficiente'] = model_sm.params
-            conf_int['P-valor'] = model_sm.pvalues
+        # Se não encontrou Expected_Goals nem PK, mostrar aviso
+        if len(variables_to_show) == 1:  # Apenas Intercepto
+            st.warning("⚠️ Expected_Goals ou variáveis relacionadas a pênaltis (PK) não estão entre as variáveis selecionadas.")
+            st.info("💡 Para ver os intervalos de confiança, inclua 'Expected_Goals' ou variáveis com 'PK' na seleção de variáveis independentes.")
+        else:
+            # Filtrar o dataframe para mostrar apenas as variáveis relevantes
+            conf_int_filtered = conf_int.loc[variables_to_show]
 
             # Reordenar colunas
-            conf_int = conf_int[['Coeficiente', 'Limite Inferior', 'Limite Superior', 'P-valor']]
+            conf_int_filtered = conf_int_filtered[['Coeficiente', 'Limite Inferior', 'Limite Superior', 'P-valor']]
 
-            st.dataframe(conf_int.round(4), use_container_width=True)
+            st.markdown("**Mostrando intervalos de confiança apenas para Expected Goals e variáveis relacionadas a pênaltis (PK):**")
+            st.dataframe(conf_int_filtered.round(4), use_container_width=True)
 
-            # Interpretação automática
-            significant_vars = conf_int[conf_int['P-valor'] < 0.05].index.tolist()
-            if 'Intercepto' in significant_vars:
-                significant_vars.remove('Intercepto')
+            # Gráfico dos intervalos de confiança (excluindo intercepto)
+            coef_plot_df = conf_int_filtered[conf_int_filtered.index != 'Intercepto'].copy()
 
-            if significant_vars:
+            if not coef_plot_df.empty:
+                fig = go.Figure()
+
+                fig.add_trace(go.Scatter(
+                    x=coef_plot_df['Coeficiente'],
+                    y=coef_plot_df.index,
+                    mode='markers',
+                    marker=dict(size=10, color='blue'),
+                    error_x=dict(
+                        type='data',
+                        symmetric=False,
+                        array=coef_plot_df['Limite Superior'] - coef_plot_df['Coeficiente'],
+                        arrayminus=coef_plot_df['Coeficiente'] - coef_plot_df['Limite Inferior']
+                    ),
+                    name='Coeficientes com IC 95%'
+                ))
+
+                # Linha vertical em zero
+                fig.add_vline(x=0, line_dash="dash", line_color="red",
+                             annotation_text="Sem efeito")
+
+                fig.update_layout(
+                    title="Intervalos de Confiança - Expected Goals e Pênaltis (95%)",
+                    xaxis_title="Valor do Coeficiente",
+                    yaxis_title="Variáveis",
+                    height=400
+                )
+
+                st.plotly_chart(fig, use_container_width=True)
+
+            # Interpretação automática apenas para as variáveis filtradas
+            significant_vars_filtered = conf_int_filtered[conf_int_filtered['P-valor'] < 0.05].index.tolist()
+            if 'Intercepto' in significant_vars_filtered:
+                significant_vars_filtered.remove('Intercepto')
+
+            if significant_vars_filtered:
                 st.markdown(f"""
                 <div class="insight-box">
                     <h4>📊 Variáveis Estatisticamente Significativas (p < 0.05):</h4>
-                    <p>{', '.join(significant_vars)}</p>
+                    <p>{', '.join(significant_vars_filtered)}</p>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown("""
+                <div class="insight-box">
+                    <h4>📊 Análise de Significância:</h4>
+                    <p>Nenhuma das variáveis selecionadas (Expected_Goals/PK) apresentou significância estatística (p < 0.05).</p>
                 </div>
                 """, unsafe_allow_html=True)
 
-        except Exception as e:
-            st.warning(f"⚠️ Não foi possível calcular intervalos de confiança: {e}")
-
-def show_advanced_ml_analysis(df):
-    """Análise avançada com múltiplos algoritmos de machine learning"""
-    st.header("🤖 Análise Avançada de Machine Learning")
-
-    # Preparação dos dados
-    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    if len(numeric_cols) < 2:
-        st.error("❌ Dados insuficientes para análise de ML")
-        return
-
-    st.subheader("🎯 Configuração do Modelo")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        target_variable = st.selectbox(
-            "📊 Variável Alvo (Target):",
-            numeric_cols,
-            help="Variável que queremos prever"
-        )
-
-    with col2:
-        feature_selection = st.multiselect(
-            "🔧 Variáveis Preditoras (Features):",
-            [col for col in numeric_cols if col != target_variable],
-            default=[col for col in numeric_cols if col != target_variable][:5],
-            help="Selecione as variáveis para treinar o modelo"
-        )
-
-    if not feature_selection:
-        st.warning("⚠️ Selecione pelo menos uma variável preditora")
-        return
-
-    # Preparação dos dados para ML
-    X = df[feature_selection].fillna(df[feature_selection].mean())
-    y = df[target_variable].fillna(df[target_variable].mean())
-
-    # Split dos dados
-    test_size = st.slider("📊 Porcentagem para Teste", 0.1, 0.5, 0.2, 0.05)
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42)
-
-    st.subheader("🧠 Comparação de Algoritmos")
-
-    # Múltiplos algoritmos
-    from sklearn.ensemble import GradientBoostingRegressor
-    from sklearn.svm import SVR
-    from sklearn.tree import DecisionTreeRegressor
-
-    algorithms = {
-        "🌲 Random Forest": RandomForestRegressor(n_estimators=100, random_state=42),
-        "📏 Linear Regression": LinearRegression(),
-        "🔥 Gradient Boosting": GradientBoostingRegressor(random_state=42),
-        "🎯 SVR (RBF)": SVR(kernel='rbf'),
-        "🌳 Decision Tree": DecisionTreeRegressor(random_state=42)
-    }
-
-    results = {}
-    models = {}
-
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-
-    for i, (name, model) in enumerate(algorithms.items()):
-        status_text.text(f"Treinando {name}...")
-
-        try:
-            # Treinar modelo
-            model.fit(X_train, y_train)
-
-            # Previsões
-            y_pred_train = model.predict(X_train)
-            y_pred_test = model.predict(X_test)
-
-            # Métricas
-            train_r2 = r2_score(y_train, y_pred_train)
-            test_r2 = r2_score(y_test, y_pred_test)
-            train_rmse = np.sqrt(mean_squared_error(y_train, y_pred_train))
-            test_rmse = np.sqrt(mean_squared_error(y_test, y_pred_test))
-            train_mae = mean_absolute_error(y_train, y_pred_train)
-            test_mae = mean_absolute_error(y_test, y_pred_test)
-
-            results[name] = {
-                'Train R²': train_r2,
-                'Test R²': test_r2,
-                'Train RMSE': train_rmse,
-                'Test RMSE': test_rmse,
-                'Train MAE': train_mae,
-                'Test MAE': test_mae,
-                'Overfitting': train_r2 - test_r2
-            }
-
-            models[name] = {
-                'model': model,
-                'y_pred_test': y_pred_test,
-                'y_pred_train': y_pred_train
-            }
-
-        except Exception as e:
-            st.warning(f"⚠️ Erro ao treinar {name}: {e}")
-            results[name] = {'Error': str(e)}
-
-        progress_bar.progress((i + 1) / len(algorithms))
-
-    status_text.text("✅ Treinamento concluído!")
-
-    # Tabela de resultados
-    results_df = pd.DataFrame(results).T
-    results_df = results_df.round(4)
-
-    st.subheader("📊 Resultados dos Modelos")
-    st.dataframe(results_df, use_container_width=True)
-
-    # Melhor modelo
-    if 'Test R²' in results_df.columns:
-        best_model_name = results_df['Test R²'].idxmax()
-        best_r2 = results_df.loc[best_model_name, 'Test R²']
-
-        st.markdown(f"""
-        <div class="success-box">
-            <h3>🏆 Melhor Modelo</h3>
-            <p><strong>{best_model_name}</strong></p>
-            <p>R² no teste: <strong>{best_r2:.4f}</strong></p>
-        </div>
-        """, unsafe_allow_html=True)
-
-    # Visualizações
-    st.subheader("📈 Visualizações dos Modelos")
-
-    # Gráfico de barras com métricas
-    if 'Test R²' in results_df.columns:
-        fig_metrics = go.Figure()
-
-        fig_metrics.add_trace(go.Bar(
-            x=results_df.index,
-            y=results_df['Test R²'],
-            name='Test R²',
-            marker_color='lightblue',
-            text=results_df['Test R²'].round(3),
-            textposition='auto'
-        ))
-
-        fig_metrics.add_trace(go.Bar(
-            x=results_df.index,
-            y=results_df['Train R²'],
-            name='Train R²',
-            marker_color='lightcoral',
-            text=results_df['Train R²'].round(3),
-            textposition='auto'
-        ))
-
-        fig_metrics.update_layout(
-            title="Comparação de R² (Train vs Test)",
-            xaxis_title="Modelos",
-            yaxis_title="R² Score",
-            barmode='group',
-            height=400
-        )
-
-        st.plotly_chart(fig_metrics, use_container_width=True)
-
-def show_clustering_analysis(df):
-    """Análise de clustering para identificar grupos de jogadores similares"""
-    st.header("🔍 Análise de Clustering - Grupos de Jogadores")
-
-    # Seleção de variáveis para clustering
-    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-
-    if len(numeric_cols) < 2:
-        st.error("❌ Dados insuficientes para análise de clustering")
-        return
-
-    st.subheader("⚙️ Configuração do Clustering")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        selected_features = st.multiselect(
-            "📊 Selecione as variáveis para clustering:",
-            numeric_cols,
-            default=numeric_cols[:4],
-            help="Escolha as variáveis que definirão os grupos"
-        )
-
-    with col2:
-        n_clusters = st.slider("🎯 Número de clusters:", 2, 8, 3)
-
-    if len(selected_features) < 2:
-        st.warning("⚠️ Selecione pelo menos 2 variáveis")
-        return
-
-    # Preparação dos dados
-    X = df[selected_features].fillna(df[selected_features].mean())
-
-    # Normalização
-    from sklearn.preprocessing import StandardScaler
-    from sklearn.cluster import KMeans
-
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-
-    # K-means clustering
-    kmeans = KMeans(n_clusters=n_clusters, random_state=42)
-    clusters = kmeans.fit_predict(X_scaled)
-
-    # Adicionar clusters ao dataframe
-    df_clustered = df.copy()
-    df_clustered['Cluster'] = clusters
-
-    st.subheader("📊 Resultados do Clustering")
-
-    # Estatísticas dos clusters
-    cluster_stats = df_clustered.groupby('Cluster')[selected_features].mean().round(2)
-    cluster_counts = df_clustered['Cluster'].value_counts().sort_index()
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.markdown("### 👥 Tamanho dos Clusters")
-        for i in range(n_clusters):
-            count = cluster_counts.get(i, 0)
-            percentage = (count / len(df)) * 100
-            st.markdown(f"""
-            <div class="metric-card">
-                <h3>Cluster {i}</h3>
-                <p>{count} jogadores ({percentage:.1f}%)</p>
-            </div>
-            """, unsafe_allow_html=True)
-
-    with col2:
-        st.markdown("### 📈 Médias por Cluster")
-        st.dataframe(cluster_stats, use_container_width=True)
-
-    # Visualização 2D (PCA)
-    if len(selected_features) > 2:
-        from sklearn.decomposition import PCA
-
-        pca = PCA(n_components=2)
-        X_pca = pca.fit_transform(X_scaled)
-
-        fig_pca = go.Figure()
-
-        colors = ['red', 'blue', 'green', 'orange', 'purple', 'brown', 'pink', 'gray']
-
-        for i in range(n_clusters):
-            cluster_mask = clusters == i
-            fig_pca.add_trace(go.Scatter(
-                x=X_pca[cluster_mask, 0],
-                y=X_pca[cluster_mask, 1],
-                mode='markers',
-                name=f'Cluster {i}',
-                marker=dict(
-                    size=8,
-                    color=colors[i % len(colors)],
-                    opacity=0.7
-                ),
-                text=df.loc[cluster_mask, 'Player'].values if 'Player' in df.columns else None,
-                hovertemplate='<b>%{text}</b><br>PC1: %{x}<br>PC2: %{y}<extra></extra>'
-            ))
-
-        fig_pca.update_layout(
-            title="Visualização dos Clusters (PCA)",
-            xaxis_title=f"PC1 ({pca.explained_variance_ratio_[0]:.2%} da variância)",
-            yaxis_title=f"PC2 ({pca.explained_variance_ratio_[1]:.2%} da variância)",
-            height=500
-        )
-
-        st.plotly_chart(fig_pca, use_container_width=True)
+    except Exception as e:
+        st.warning(f"⚠️ Não foi possível calcular intervalos de confiança: {e}")
 
 def show_statistical_tests_advanced(df):
     """Seção avançada com múltiplos testes estatísticos"""
-    st.header("🧪 Testes Estatísticos Avançados")
+    st.header("Testes Estatísticos Avançados")
 
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     if len(numeric_cols) < 2:
         st.error("❌ Dados insuficientes para testes estatísticos")
         return
 
-    st.subheader("🎯 Configuração dos Testes")
+    st.subheader("Configuração dos Testes")
 
     test_type = st.selectbox(
         "📊 Escolha o tipo de teste:",
         [
             "🔗 Correlação (Pearson vs Spearman)",
-            "📈 Normalidade (Shapiro-Wilk)",
+            "Normalidade (Shapiro-Wilk)",
             "⚖️ Comparação de Grupos (t-test, Mann-Whitney)",
             "🎲 ANOVA (One-way)",
-            "🔍 Regressão Linear (Significância)",
+            "Regressão Linear (Significância)",
             "📊 Teste de Homocedasticidade"
         ]
     )
@@ -1353,7 +1150,7 @@ def show_statistical_tests_advanced(df):
                 with col2:
                     st.markdown(f"""
                     <div class="metric-card">
-                        <h3>📈 Spearman</h3>
+                        <h3>Spearman</h3>
                         <p><strong>ρ = {spearman_corr:.4f}</strong></p>
                         <p>p-valor: {spearman_p:.4f}</p>
                         <p>{'✅ Significativo' if spearman_p < 0.05 else '❌ Não significativo'}</p>
@@ -1383,7 +1180,7 @@ def show_statistical_tests_advanced(df):
                 """, unsafe_allow_html=True)
 
     elif "Normalidade" in test_type:
-        st.subheader("📈 Teste de Normalidade")
+        st.subheader("Teste de Normalidade")
 
         selected_var = st.selectbox("Escolha a variável:", numeric_cols)
 
@@ -1430,7 +1227,7 @@ def show_statistical_tests_advanced(df):
 
                     st.markdown(f"""
                     <div class="metric-card">
-                        <h3>📈 Descritivas</h3>
+                        <h3>Descritivas</h3>
                         <p>Média: {mean_val:.2f}</p>
                         <p>Desvio: {std_val:.2f}</p>
                         <p>Assimetria: {skew_val:.2f}</p>
@@ -1562,6 +1359,222 @@ def show_statistical_tests_advanced(df):
                 )
 
                 st.plotly_chart(fig, use_container_width=True)
+
+    elif "Regressão Linear" in test_type:
+        st.subheader("Teste de Hipótese H1 - Regressão Linear")
+
+        st.markdown("""
+        <div class="insight-box">
+            <h4>📋 Formulação das Hipóteses</h4>
+            <p><strong>H0:</strong> Não existe relação linear significativa entre as variáveis (β = 0)</p>
+            <p><strong>H1:</strong> Existe relação linear significativa entre as variáveis (β ≠ 0)</p>
+            <p><strong>Nível de significância:</strong> α = 0.05</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            dependent_var = st.selectbox(
+                "Variável Dependente (Y):",
+                numeric_cols,
+                help="Variável que queremos prever"
+            )
+
+        with col2:
+            independent_vars = st.multiselect(
+                "Variáveis Independentes (X):",
+                [col for col in numeric_cols if col != dependent_var],
+                help="Variáveis preditoras"
+            )
+
+        if dependent_var and independent_vars:
+            from sklearn.linear_model import LinearRegression
+            from sklearn.metrics import r2_score
+            import statsmodels.api as sm
+            from scipy import stats
+
+            # Preparar dados
+            X = df[independent_vars].dropna()
+            y = df[dependent_var].dropna()
+
+            # Sincronizar índices
+            common_idx = X.index.intersection(y.index)
+            X = X.loc[common_idx]
+            y = y.loc[common_idx]
+
+            if len(X) > len(independent_vars) + 1:  # Verificar se há dados suficientes
+
+                # Modelo sklearn para métricas básicas
+                model_sklearn = LinearRegression()
+                model_sklearn.fit(X, y)
+                y_pred = model_sklearn.predict(X)
+                r2 = r2_score(y, y_pred)
+
+                # Modelo statsmodels para testes de significância
+                X_sm = sm.add_constant(X)  # Adicionar intercepto
+                model_sm = sm.OLS(y, X_sm).fit()
+
+                # Teste F global
+                f_statistic = model_sm.fvalue
+                f_pvalue = model_sm.f_pvalue
+
+                # Resultados do teste de hipótese
+                st.subheader("📊 Resultados do Teste de Hipótese H1")
+
+                col1, col2, col3 = st.columns(3)
+
+                with col1:
+                    st.markdown(f"""
+                    <div class="metric-card">
+                        <h3>📈 Teste F Global</h3>
+                        <p><strong>F = {f_statistic:.4f}</strong></p>
+                        <p>p-valor: {f_pvalue:.6f}</p>
+                        <p>{'✅ Rejeitar H0' if f_pvalue < 0.05 else '❌ Não rejeitar H0'}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                with col2:
+                    st.markdown(f"""
+                    <div class="metric-card">
+                        <h3>📊 R² Ajustado</h3>
+                        <p><strong>R²adj = {model_sm.rsquared_adj:.4f}</strong></p>
+                        <p>R² = {r2:.4f}</p>
+                        <p>{(r2*100):.1f}% da variância explicada</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                with col3:
+                    # Critério de decisão
+                    decision = "SIGNIFICATIVA" if f_pvalue < 0.05 else "NÃO SIGNIFICATIVA"
+                    decision_color = "green" if f_pvalue < 0.05 else "red"
+
+                    st.markdown(f"""
+                    <div class="metric-card">
+                        <h3>⚖️ Decisão</h3>
+                        <p><strong style="color: {decision_color};">{decision}</strong></p>
+                        <p>Graus de liberdade: {model_sm.df_model:.0f}</p>
+                        <p>Resíduos: {model_sm.df_resid:.0f}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                # Tabela de coeficientes
+                st.subheader("📋 Análise dos Coeficientes")
+
+                coef_data = []
+                for i, var in enumerate(['const'] + independent_vars):
+                    coef_val = model_sm.params[var]
+                    p_val = model_sm.pvalues[var]
+                    t_val = model_sm.tvalues[var]
+                    conf_int = model_sm.conf_int().loc[var]
+
+                    coef_data.append({
+                        'Variável': var,
+                        'Coeficiente': f"{coef_val:.4f}",
+                        'Erro Padrão': f"{model_sm.bse[var]:.4f}",
+                        'Estatística t': f"{t_val:.4f}",
+                        'p-valor': f"{p_val:.6f}",
+                        'IC 95% Inferior': f"{conf_int[0]:.4f}",
+                        'IC 95% Superior': f"{conf_int[1]:.4f}",
+                        'Significativo': "✅" if p_val < 0.05 else "❌"
+                    })
+
+                import pandas as pd
+                coef_df = pd.DataFrame(coef_data)
+                st.dataframe(coef_df, use_container_width=True)
+
+                # Gráfico de resíduos vs preditos
+                residuals = y - y_pred
+
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    fig_resid = go.Figure()
+                    fig_resid.add_trace(go.Scatter(
+                        x=y_pred,
+                        y=residuals,
+                        mode='markers',
+                        name='Resíduos',
+                        marker=dict(color='blue', opacity=0.6)
+                    ))
+                    fig_resid.add_hline(y=0, line_dash="dash", line_color="red")
+                    fig_resid.update_layout(
+                        title="Resíduos vs Valores Preditos",
+                        xaxis_title="Valores Preditos",
+                        yaxis_title="Resíduos",
+                        height=400
+                    )
+                    st.plotly_chart(fig_resid, use_container_width=True)
+
+                with col2:
+                    # Q-Q plot dos resíduos
+                    from scipy.stats import probplot
+
+                    qq_data = probplot(residuals, dist="norm")
+
+                    fig_qq = go.Figure()
+                    fig_qq.add_trace(go.Scatter(
+                        x=qq_data[0][0],
+                        y=qq_data[0][1],
+                        mode='markers',
+                        name='Resíduos',
+                        marker=dict(color='green', opacity=0.6)
+                    ))
+                    fig_qq.add_trace(go.Scatter(
+                        x=qq_data[0][0],
+                        y=qq_data[1][1] + qq_data[1][0] * qq_data[0][0],
+                        mode='lines',
+                        name='Linha Teórica',
+                        line=dict(color='red', dash='dash')
+                    ))
+                    fig_qq.update_layout(
+                        title="Q-Q Plot dos Resíduos",
+                        xaxis_title="Quantis Teóricos",
+                        yaxis_title="Quantis da Amostra",
+                        height=400
+                    )
+                    st.plotly_chart(fig_qq, use_container_width=True)
+
+                # Interpretação dos resultados
+                st.subheader("📝 Interpretação dos Resultados")
+
+                interpretation = []
+
+                if f_pvalue < 0.05:
+                    interpretation.append("✅ **Conclusão H1:** Rejeitamos a hipótese nula (H0). Há evidência estatística suficiente para afirmar que existe uma relação linear significativa entre as variáveis.")
+                    interpretation.append(f"📊 O modelo explica {(r2*100):.1f}% da variabilidade na variável dependente '{dependent_var}'.")
+                else:
+                    interpretation.append("❌ **Conclusão H0:** Não rejeitamos a hipótese nula (H0). Não há evidência estatística suficiente para afirmar que existe uma relação linear significativa.")
+
+                # Análise individual dos coeficientes
+                significant_vars = [var for var in independent_vars if model_sm.pvalues[var] < 0.05]
+                non_significant_vars = [var for var in independent_vars if model_sm.pvalues[var] >= 0.05]
+
+                if significant_vars:
+                    interpretation.append(f"🎯 **Variáveis significativas:** {', '.join(significant_vars)}")
+                if non_significant_vars:
+                    interpretation.append(f"⚠️ **Variáveis não significativas:** {', '.join(non_significant_vars)}")
+
+                interpretation.append(f"📈 **Qualidade do ajuste:** R² ajustado = {model_sm.rsquared_adj:.4f}")
+
+                for text in interpretation:
+                    st.markdown(text)
+
+                # Pressupostos do modelo
+                with st.expander("🔍 Verificação dos Pressupostos"):
+                    st.markdown("""
+                    **Pressupostos da Regressão Linear:**
+                    1. **Linearidade:** Relação linear entre X e Y
+                    2. **Independência:** Observações independentes
+                    3. **Homocedasticidade:** Variância constante dos erros
+                    4. **Normalidade:** Resíduos seguem distribuição normal
+
+                    **Verificação visual:**
+                    - **Gráfico de Resíduos:** Pontos devem estar distribuídos aleatoriamente em torno de zero
+                    - **Q-Q Plot:** Pontos devem seguir aproximadamente a linha diagonal
+                    """)
+            else:
+                st.warning("❌ Dados insuficientes para realizar a regressão linear")
 
 def show_player_comparison(df):
     """Nova seção para comparação detalhada entre jogadores"""
@@ -1700,7 +1713,7 @@ def show_player_comparison(df):
         st.dataframe(comparison_df, use_container_width=True, hide_index=True)
 
     # Insights da comparação
-    st.subheader("💡 Insights da Comparação")
+    st.subheader("Insights da Comparação")
 
     insights = []
 
@@ -1708,19 +1721,19 @@ def show_player_comparison(df):
         goals_diff = p1_data.get('Goals', 0) - p2_data.get('Goals', 0)
         if abs(goals_diff) > 0:
             better_scorer = player1 if goals_diff > 0 else player2
-            insights.append(f"⚽ **{better_scorer}** é mais artilheiro ({abs(goals_diff)} gols de diferença)")
+            insights.append(f"⚽ {better_scorer} é mais artilheiro ({abs(goals_diff)} gols de diferença)")
 
     if 'Assists' in df.columns:
         assists_diff = p1_data.get('Assists', 0) - p2_data.get('Assists', 0)
         if abs(assists_diff) > 0:
             better_assistant = player1 if assists_diff > 0 else player2
-            insights.append(f"🎯 **{better_assistant}** é melhor assistente ({abs(assists_diff)} assistências de diferença)")
+            insights.append(f"{better_assistant} é melhor assistente ({abs(assists_diff)} assistências de diferença)")
 
     if 'Minutes' in df.columns:
         minutes_diff = p1_data.get('Minutes', 0) - p2_data.get('Minutes', 0)
         if abs(minutes_diff) > 90:  # Mais de um jogo de diferença
             more_minutes = player1 if minutes_diff > 0 else player2
-            insights.append(f"⏱️ **{more_minutes}** jogou mais ({abs(minutes_diff):.0f} minutos de diferença)")
+            insights.append(f"⏱️ {more_minutes} jogou mais ({abs(minutes_diff):.0f} minutos de diferença)")
 
     if insights:
         for insight in insights:
@@ -1812,7 +1825,7 @@ def show_team_analysis(df):
             top_assistant = team_data.loc[team_data['Assists'].idxmax()]
             st.markdown(f"""
             <div class="success-box">
-                <h3>🎯 Melhor Assistente</h3>
+                <h3>Melhor Assistente</h3>
                 <p><strong>{top_assistant['Player']}</strong></p>
                 <p>{top_assistant['Assists']} assistências</p>
             </div>
@@ -1858,7 +1871,7 @@ def show_team_analysis(df):
 
     st.markdown(f"""
     <div class="insight-box">
-        <h3>📈 Posição no Ranking</h3>
+        <h3>Posição no Ranking</h3>
         <p><strong>{selected_team}</strong> está em <strong>{team_position}º lugar</strong> em gols totais</p>
     </div>
     """, unsafe_allow_html=True)
@@ -1972,87 +1985,280 @@ def show_team_analysis(df):
             conf_int = model_sm.conf_int()
             conf_int.columns = ['Limite Inferior', 'Limite Superior']
             conf_int.index = ['Intercepto'] + selected_features
-            st.dataframe(conf_int.round(4))
+
+            # Filtrar apenas Expected_Goals e variáveis relacionadas a pênaltis (PK)
+            variables_to_show = ['Intercepto']
+
+            # Adicionar Expected_Goals se estiver nas features selecionadas
+            if 'Expected_Goals' in conf_int.index:
+                variables_to_show.append('Expected_Goals')
+
+            # Adicionar variáveis relacionadas a pênaltis (PK)
+            pk_related = [col for col in conf_int.index if any(keyword in col.upper() for keyword in ['PK', 'PENAL', 'PENALTY'])]
+            variables_to_show.extend(pk_related)
+
+            # Se não encontrou Expected_Goals nem PK, mostrar aviso
+            if len(variables_to_show) == 1:  # Apenas Intercepto
+                st.warning("⚠️ Expected_Goals ou variáveis relacionadas a pênaltis (PK) não estão entre as variáveis selecionadas.")
+                st.info("💡 Para ver os intervalos de confiança, inclua 'Expected_Goals' ou variáveis com 'PK' na seleção de variáveis independentes.")
+            else:
+                # Filtrar o dataframe para mostrar apenas as variáveis relevantes
+                conf_int_filtered = conf_int.loc[variables_to_show]
+                st.markdown("**Mostrando intervalos de confiança apenas para Expected Goals e variáveis relacionadas a pênaltis (PK):**")
+                st.dataframe(conf_int_filtered.round(4))
 
 def show_hypothesis_testing(df):
     """Testes de hipóteses"""
     st.header("🧪 Testes de Hipóteses")
 
     st.markdown("""
-    **Hipóteses testadas com base na análise exploratória:**
+    ### 📋 Hipóteses Testadas
+    Análise estatística rigorosa com base nos dados da Premier League:
     """)
 
-    # Teste 1: xG prediz gols reais
-    if 'xG' in df.columns and 'Goals' in df.columns:
+    # Teste 1: Expected Goals prediz gols reais
+    if 'Expected_Goals' in df.columns and 'Goals' in df.columns:
         st.subheader("H1: Expected Goals (xG) prediz gols reais")
 
-        # Correlação de Pearson
-        corr_coef, p_value = stats.pearsonr(df['xG'].dropna(), df['Goals'].dropna())
-
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Correlação", f"{corr_coef:.3f}")
-        with col2:
-            st.metric("p-valor", f"{p_value:.2e}")
-        with col3:
-            resultado = "✅ Rejeitamos H0" if p_value < 0.05 else "❌ Não rejeitamos H0"
-            st.metric("Resultado", resultado)
-
-        st.markdown(f"""
+        st.markdown("""
         <div class="insight-box">
-        <strong>Interpretação:</strong> {'Existe correlação significativa entre xG e gols reais.' if p_value < 0.05 else 'Não há evidência de correlação significativa.'}
+            <h4>📋 Formulação da Hipótese</h4>
+            <p><strong>H0:</strong> Não existe correlação significativa entre Expected Goals e gols reais (ρ = 0)</p>
+            <p><strong>H1:</strong> Existe correlação significativa entre Expected Goals e gols reais (ρ ≠ 0)</p>
+            <p><strong>Nível de significância:</strong> α = 0.05</p>
         </div>
         """, unsafe_allow_html=True)
+
+        # Preparar dados - remover valores nulos
+        clean_data = df[['Expected_Goals', 'Goals']].dropna()
+
+        if len(clean_data) > 10:  # Verificar se há dados suficientes
+            # Correlação de Pearson
+            corr_coef, p_value = stats.pearsonr(clean_data['Expected_Goals'], clean_data['Goals'])
+
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <h3>📊 Correlação</h3>
+                    <p><strong>r = {corr_coef:.4f}</strong></p>
+                    <p>Força: {'Forte' if abs(corr_coef) > 0.7 else 'Moderada' if abs(corr_coef) > 0.3 else 'Fraca'}</p>
+                </div>
+                """, unsafe_allow_html=True)
+
+            with col2:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <h3>📈 p-valor</h3>
+                    <p><strong>{p_value:.2e}</strong></p>
+                    <p>Critério: p < 0.05</p>
+                </div>
+                """, unsafe_allow_html=True)
+
+            with col3:
+                resultado = "✅ Rejeitamos H0" if p_value < 0.05 else "❌ Não rejeitamos H0"
+                resultado_cor = "green" if p_value < 0.05 else "red"
+                st.markdown(f"""
+                <div class="metric-card">
+                    <h3>⚖️ Decisão</h3>
+                    <p><strong style="color: {resultado_cor};">{resultado}</strong></p>
+                    <p>n = {len(clean_data)} observações</p>
+                </div>
+                """, unsafe_allow_html=True)
+
+            # Gráfico de dispersão
+            fig = px.scatter(
+                clean_data,
+                x='Expected_Goals',
+                y='Goals',
+                title="Relação entre Expected Goals e Gols Reais",
+                trendline="ols",
+                labels={'Expected_Goals': 'Expected Goals (xG)', 'Goals': 'Gols Reais'}
+            )
+            fig.update_layout(height=400)
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Interpretação detalhada
+            st.markdown(f"""
+            <div class="insight-box">
+                <h4>📝 Interpretação dos Resultados</h4>
+                <p><strong>Conclusão:</strong> {'Existe correlação significativa entre Expected Goals e gols reais.' if p_value < 0.05 else 'Não há evidência de correlação significativa.'}</p>
+                <p><strong>Força da relação:</strong> Correlação {'forte' if abs(corr_coef) > 0.7 else 'moderada' if abs(corr_coef) > 0.3 else 'fraca'} (r = {corr_coef:.4f})</p>
+                <p><strong>Significância:</strong> {'Estatisticamente significativo' if p_value < 0.05 else 'Não estatisticamente significativo'} (p = {p_value:.4f})</p>
+                <p><strong>Interpretação prática:</strong> {'Expected Goals é um bom preditor de performance ofensiva real.' if p_value < 0.05 and abs(corr_coef) > 0.5 else 'Expected Goals tem relação limitada com gols reais neste dataset.'}</p>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.warning("❌ Dados insuficientes para realizar o teste de correlação")
+    else:
+        st.warning("❌ Colunas 'Expected_Goals' ou 'Goals' não encontradas no dataset")
 
     # Teste 2: Diferença de performance entre posições
     if 'Pos' in df.columns and 'Goals' in df.columns:
         st.subheader("H2: Existe diferença de performance entre posições")
 
+        st.markdown("""
+        <div class="insight-box">
+            <h4>📋 Formulação da Hipótese</h4>
+            <p><strong>H0:</strong> Não existe diferença significativa de gols entre posições</p>
+            <p><strong>H1:</strong> Existe diferença significativa de gols entre posições</p>
+            <p><strong>Teste:</strong> ANOVA (Analysis of Variance)</p>
+        </div>
+        """, unsafe_allow_html=True)
+
         # ANOVA
         positions = df['Pos'].unique()
         groups = [df[df['Pos'] == pos]['Goals'].dropna() for pos in positions]
 
-        # Remover grupos vazios
-        groups = [group for group in groups if len(group) > 0]
+        # Remover grupos vazios e com poucos dados
+        groups = [group for group in groups if len(group) >= 3]
 
         if len(groups) >= 2:
             f_stat, p_value = stats.f_oneway(*groups)
 
             col1, col2, col3 = st.columns(3)
             with col1:
-                st.metric("F-statistic", f"{f_stat:.3f}")
+                st.markdown(f"""
+                <div class="metric-card">
+                    <h3>📊 F-statistic</h3>
+                    <p><strong>F = {f_stat:.4f}</strong></p>
+                    <p>{len(groups)} grupos comparados</p>
+                </div>
+                """, unsafe_allow_html=True)
+
             with col2:
-                st.metric("p-valor", f"{p_value:.2e}")
+                st.markdown(f"""
+                <div class="metric-card">
+                    <h3>📈 p-valor</h3>
+                    <p><strong>{p_value:.4f}</strong></p>
+                    <p>Critério: p < 0.05</p>
+                </div>
+                """, unsafe_allow_html=True)
+
             with col3:
                 resultado = "✅ Rejeitamos H0" if p_value < 0.05 else "❌ Não rejeitamos H0"
-                st.metric("Resultado", resultado)
+                resultado_cor = "green" if p_value < 0.05 else "red"
+                st.markdown(f"""
+                <div class="metric-card">
+                    <h3>⚖️ Decisão</h3>
+                    <p><strong style="color: {resultado_cor};">{resultado}</strong></p>
+                    <p>Total: {sum(len(g) for g in groups)} jogadores</p>
+                </div>
+                """, unsafe_allow_html=True)
+
+            # Box plot por posição
+            pos_data = []
+            for pos in positions:
+                pos_goals = df[df['Pos'] == pos]['Goals'].tolist()
+                if len(pos_goals) >= 3:  # Apenas posições com dados suficientes
+                    pos_data.extend([(pos, goal) for goal in pos_goals])
+
+            if pos_data:
+                pos_df = pd.DataFrame(pos_data, columns=['Posição', 'Gols'])
+
+                fig = px.box(
+                    pos_df,
+                    x='Posição',
+                    y='Gols',
+                    title="Distribuição de Gols por Posição"
+                )
+                fig.update_layout(height=400)
+                st.plotly_chart(fig, use_container_width=True)
 
             st.markdown(f"""
             <div class="insight-box">
-            <strong>Interpretação:</strong> {'Existe diferença significativa de performance entre posições.' if p_value < 0.05 else 'Não há evidência de diferença significativa entre posições.'}
+                <h4>📝 Interpretação dos Resultados</h4>
+                <p><strong>Conclusão:</strong> {'Existe diferença significativa de performance entre posições.' if p_value < 0.05 else 'Não há evidência de diferença significativa entre posições.'}</p>
+                <p><strong>Estatística F:</strong> {f_stat:.4f} - {'Indica variação entre grupos maior que dentro dos grupos' if f_stat > 1 else 'Pouca variação entre grupos'}</p>
+                <p><strong>Interpretação prática:</strong> {'Posição é um fator relevante para performance ofensiva.' if p_value < 0.05 else 'Posição não parece influenciar significativamente o número de gols.'}</p>
             </div>
             """, unsafe_allow_html=True)
+        else:
+            st.warning("❌ Dados insuficientes para ANOVA (precisa de pelo menos 2 grupos com 3+ observações cada)")
 
     # Teste 3: Correlação entre idade e performance
     if 'Age' in df.columns and 'Goals' in df.columns:
         st.subheader("H3: Idade influencia performance")
 
-        corr_coef, p_value = stats.pearsonr(df['Age'].dropna(), df['Goals'].dropna())
-
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Correlação", f"{corr_coef:.3f}")
-        with col2:
-            st.metric("p-valor", f"{p_value:.3f}")
-        with col3:
-            resultado = "✅ Rejeitamos H0" if p_value < 0.05 else "❌ Não rejeitamos H0"
-            st.metric("Resultado", resultado)
-
-        st.markdown(f"""
+        st.markdown("""
         <div class="insight-box">
-        <strong>Interpretação:</strong> {'Existe correlação significativa entre idade e performance.' if p_value < 0.05 else 'Não há evidência de correlação significativa entre idade e performance.'}
+            <h4>📋 Formulação da Hipótese</h4>
+            <p><strong>H0:</strong> Não existe correlação significativa entre idade e gols (ρ = 0)</p>
+            <p><strong>H1:</strong> Existe correlação significativa entre idade e gols (ρ ≠ 0)</p>
+            <p><strong>Teste:</strong> Correlação de Pearson</p>
         </div>
         """, unsafe_allow_html=True)
+
+        # Preparar dados
+        age_goals_data = df[['Age', 'Goals']].dropna()
+
+        if len(age_goals_data) > 10:
+            corr_coef, p_value = stats.pearsonr(age_goals_data['Age'], age_goals_data['Goals'])
+
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <h3>📊 Correlação</h3>
+                    <p><strong>r = {corr_coef:.4f}</strong></p>
+                    <p>Direção: {'Positiva' if corr_coef > 0 else 'Negativa'}</p>
+                </div>
+                """, unsafe_allow_html=True)
+
+            with col2:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <h3>📈 p-valor</h3>
+                    <p><strong>{p_value:.4f}</strong></p>
+                    <p>Critério: p < 0.05</p>
+                </div>
+                """, unsafe_allow_html=True)
+
+            with col3:
+                resultado = "✅ Rejeitamos H0" if p_value < 0.05 else "❌ Não rejeitamos H0"
+                resultado_cor = "green" if p_value < 0.05 else "red"
+                st.markdown(f"""
+                <div class="metric-card">
+                    <h3>⚖️ Decisão</h3>
+                    <p><strong style="color: {resultado_cor};">{resultado}</strong></p>
+                    <p>n = {len(age_goals_data)} jogadores</p>
+                </div>
+                """, unsafe_allow_html=True)
+
+            # Gráfico de dispersão idade vs gols
+            fig = px.scatter(
+                age_goals_data,
+                x='Age',
+                y='Goals',
+                title="Relação entre Idade e Número de Gols",
+                trendline="ols"
+            )
+            fig.update_layout(height=400)
+            st.plotly_chart(fig, use_container_width=True)
+
+            st.markdown(f"""
+            <div class="insight-box">
+                <h4>📝 Interpretação dos Resultados</h4>
+                <p><strong>Conclusão:</strong> {'Existe correlação significativa entre idade e performance.' if p_value < 0.05 else 'Não há evidência de correlação significativa entre idade e performance.'}</p>
+                <p><strong>Direção:</strong> {'Jogadores mais velhos tendem a marcar mais gols' if corr_coef > 0 and p_value < 0.05 else 'Jogadores mais novos tendem a marcar mais gols' if corr_coef < 0 and p_value < 0.05 else 'Idade não parece influenciar significativamente o número de gols'}</p>
+                <p><strong>Força:</strong> Correlação {'forte' if abs(corr_coef) > 0.7 else 'moderada' if abs(corr_coef) > 0.3 else 'fraca'} (|r| = {abs(corr_coef):.4f})</p>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.warning("❌ Dados insuficientes para teste de correlação idade-performance")
+
+    # Resumo dos testes
+    st.subheader("📊 Resumo dos Testes de Hipóteses")
+
+    st.markdown("""
+    <div class="insight-box">
+        <h4>🎯 Metodologia Aplicada</h4>
+        <p><strong>Testes realizados:</strong> Correlação de Pearson e ANOVA</p>
+        <p><strong>Nível de significância:</strong> α = 0.05 (95% de confiança)</p>
+        <p><strong>Interpretação:</strong> p < 0.05 indica evidência estatística suficiente para rejeitar H0</p>
+        <p><strong>Limitações:</strong> Resultados válidos para este dataset específico da temporada 2023/24</p>
+    </div>
+    """, unsafe_allow_html=True)
 
 def show_visualizations(df):
     """Visualizações avançadas"""
@@ -2122,13 +2328,13 @@ def show_insights_solutions(df):
     if 'xG' in df.columns and 'Goals' in df.columns:
         corr_xg = df['xG'].corr(df['Goals'])
         if abs(corr_xg) > 0.7:
-            insights.append(f"⚽ **Expected Goals é um excelente preditor**: Correlação de {corr_xg:.3f} com gols reais")
+            insights.append(f"⚽ Expected Goals é um excelente preditor: Correlação de {corr_xg:.3f} com gols reais")
 
     # Insight sobre top performers
     if 'Goals' in df.columns:
         top_scorer_goals = df['Goals'].max()
         avg_goals = df['Goals'].mean()
-        insights.append(f"🏆 **Concentração de performance**: O artilheiro máximo ({top_scorer_goals} gols) marca {top_scorer_goals/avg_goals:.1f}x mais que a média ({avg_goals:.1f} gols)")
+        insights.append(f"🏆 Concentração de performance: O artilheiro máximo ({top_scorer_goals} gols) marca {top_scorer_goals/avg_goals:.1f}x mais que a média ({avg_goals:.1f} gols)")
 
     # Insight sobre posições
     if 'Pos' in df.columns and 'Goals' in df.columns:
@@ -2136,7 +2342,7 @@ def show_insights_solutions(df):
         if len(pos_performance) > 1:
             best_pos = pos_performance.index[0]
             best_avg = pos_performance.iloc[0]
-            insights.append(f"🎯 **Posição mais efetiva**: {best_pos} tem média de {best_avg:.1f} gols")
+            insights.append(f"🎯 Posição mais efetiva: {best_pos} tem média de {best_avg:.1f} gols")
 
     for insight in insights:
         st.markdown(f"""
@@ -2148,16 +2354,16 @@ def show_insights_solutions(df):
     st.subheader("🎯 Recomendações Práticas")
 
     recommendations = [
-        "📊 **Para Scouts**: Utilize xG como métrica principal de avaliação - é mais confiável que gols totais",
-        "💰 **Para Contratações**: Foque em jogadores com alto xG mas baixos gols realizados - podem estar subperformando temporariamente",
-        "📈 **Para Desenvolvimento**: Analise eficiência de conversão para identificar jogadores que precisam melhorar finalização",
-        "🎮 **Para Estratégia**: Considere posição ao definir expectativas de performance ofensiva",
-        "⏱️ **Para Gestão**: Normalize métricas por 90 minutos para comparações justas entre jogadores"
+        "📊 Para Scouts: Utilize xG como métrica principal de avaliação - é mais confiável que gols totais",
+        "💰 Para Contratações: Foque em jogadores com alto xG mas baixos gols realizados - podem estar subperformando temporariamente",
+        "📈 Para Desenvolvimento: Analise eficiência de conversão para identificar jogadores que precisam melhorar finalização",
+        "🎮 Para Estratégia: Considere posição ao definir expectativas de performance ofensiva",
+        "⏱️ Para Gestão: Normalize métricas por 90 minutos para comparações justas entre jogadores"
     ]
 
     for rec in recommendations:
         st.markdown(f"""
-        <div style="background-color: #f0f8ff; padding: 1rem; border-radius: 10px; margin: 0.5rem 0; border-left: 5px solid #4CAF50;">
+        <div style="background-color: #f0f8ff; padding: 1rem; border-radius: 10px; margin: 0.5rem 0; border-left: 5px solid #4CAF50; color: #155724;">
         {rec}
         </div>
         """, unsafe_allow_html=True)
@@ -2165,15 +2371,15 @@ def show_insights_solutions(df):
     st.subheader("⚠️ Limitações do Estudo")
 
     limitations = [
-        "📅 **Temporal**: Análise limitada a uma temporada - padrões podem variar ao longo do tempo",
-        "🏥 **Contextual**: Não considera lesões, mudanças táticas ou fatores externos",
-        "⚽ **Escopo**: Foco em métricas ofensivas - defesa e meio-campo podem ter outros indicadores importantes",
-        "📊 **Causal**: Correlações não implicam causalidade - são indicadores, não garantias"
+        "📅 Temporal: Análise limitada a uma temporada - padrões podem variar ao longo do tempo",
+        "🏥 Contextual: Não considera lesões, mudanças táticas ou fatores externos",
+        "⚽ Escopo: Foco em métricas ofensivas - defesa e meio-campo podem ter outros indicadores importantes",
+        "📊 Causal: Correlações não implicam causalidade - são indicadores, não garantias"
     ]
 
     for limitation in limitations:
         st.markdown(f"""
-        <div style="background-color: #fff3cd; padding: 1rem; border-radius: 10px; margin: 0.5rem 0; border-left: 5px solid #ffc107;">
+        <div style="background-color: #fff3cd; padding: 1rem; border-radius: 10px; margin: 0.5rem 0; border-left: 5px solid #ffc107; color: #856404;">
         {limitation}
         </div>
         """, unsafe_allow_html=True)
@@ -2288,18 +2494,13 @@ def main():
         'show_animations': show_animations
     })
 
-    # Navegação principal com tabs melhoradas
+    # Navegação principal simplificada - foco nas funcionalidades essenciais
     tab_config = {
-        "🏠 Dashboard": "overview",
-        "🔍 Exploração": "exploratory",
-        "📈 Modelagem": "modeling",
-        "🤖 ML Avançado": "advanced_ml",
-        "🔍 Clustering": "clustering",
-        "🥊 Comparar Jogadores": "player_comparison",
-        "🏟️ Análise de Times": "team_analysis",
-        "🧪 Hipóteses": "hypothesis",
-        "📊 Visualizações": "visualizations",
-        "💡 Insights": "insights"
+        "🏠 Visão Geral": "overview",
+        "🔍 Análise Exploratória": "exploratory",
+        "📈 Modelagem Linear": "modeling",
+        "� Testes de Hipóteses": "hypothesis",
+        " Insights e Soluções": "insights"
     }
 
     selected_tab = st.selectbox(
@@ -2318,20 +2519,8 @@ def main():
             show_exploratory_analysis(df)
         elif section == "modeling":
             show_statistical_modeling(df)
-        elif section == "advanced_ml":
-            show_advanced_ml_analysis(df)
-        elif section == "clustering":
-            show_clustering_analysis(df)
-        elif section == "advanced_tests":
-            show_statistical_tests_advanced(df)
-        elif section == "player_comparison":
-            show_player_comparison(df)
-        elif section == "team_analysis":
-            show_team_analysis(df)
         elif section == "hypothesis":
             show_hypothesis_testing(df)
-        elif section == "visualizations":
-            show_visualizations(df)
         elif section == "insights":
             show_insights_solutions(df)
 
@@ -2339,23 +2528,21 @@ def main():
         st.markdown(f"""
         <div class="warning-box">
             <h3>⚠️ Erro na Seção</h3>
-            <p>Ocorreu um erro ao carregar a seção: {str(e)}</p>
-            <p>Tente recarregar a página ou selecionar outra seção.</p>
+            <p>Ocorreu um erro ao carregar a seção <strong>{selected_tab}</strong>:</p>
+            <p style="color: #ff6b6b; font-family: monospace;">{str(e)}</p>
+            <p>🔄 Sugestões:</p>
+            <ul>
+                <li>Recarregue a página (F5)</li>
+                <li>Verifique se o dataset está carregado corretamente</li>
+                <li>Tente selecionar outra seção</li>
+                <li>Se o problema persistir, verifique os dados de entrada</li>
+            </ul>
         </div>
         """, unsafe_allow_html=True)
 
-    # Footer melhorado
-    st.markdown("---")
-    st.markdown("""
-    <div class="footer">
-        <h3>🎓 Projeto de Modelagem Estatística</h3>
-        <p><strong>Premier League Analysis 2023/24</strong></p>
-        <p>📊 Desenvolvido com Streamlit • 🐍 Python • 📈 Plotly • 🤖 Machine Learning</p>
-        <p style="opacity: 0.7; font-size: 0.9em;">
-            Transformando dados esportivos em insights acionáveis desde 2024 ⚽
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
+        # Log detalhado do erro para desenvolvimento
+        if st.checkbox("🔧 Mostrar detalhes técnicos do erro", key="show_error_details"):
+            st.exception(e)
 
 if __name__ == "__main__":
     main()
