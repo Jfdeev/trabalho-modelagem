@@ -323,7 +323,10 @@ def load_data():
             'xG': 'Expected_Goals',
             'xAG': 'Expected_Assists',
             'CrdY': 'Yellow_Cards',
-            'CrdR': 'Red_Cards'
+            'CrdR': 'Red_Cards',
+            'PK': 'Penalty_Goals',
+            'PKatt': 'Penalty_Attempts',
+            'PKM': 'Penalty_Missed'
         }
 
         # Aplicar mapeamento apenas para colunas que existem
@@ -1006,106 +1009,86 @@ def show_statistical_modeling(df):
         conf_int['Coeficiente'] = model_sm.params
         conf_int['P-valor'] = model_sm.pvalues
 
-        # Reordenar colunas
-        conf_int = conf_int[['Coeficiente', 'Limite Inferior', 'Limite Superior', 'P-valor']]
+        # Filtrar apenas Expected_Goals e variáveis relacionadas a pênaltis (PK)
+        variables_to_show = ['Intercepto']
 
-        st.dataframe(conf_int.round(4), use_container_width=True)
+        # Adicionar Expected_Goals se estiver nas features selecionadas
+        if 'Expected_Goals' in conf_int.index:
+            variables_to_show.append('Expected_Goals')
 
-        # Gráfico dos intervalos de confiança
-        coef_plot_df = conf_int[conf_int.index != 'Intercepto'].copy()
+        # Adicionar variáveis relacionadas a pênaltis (PK)
+        pk_related = [col for col in conf_int.index if any(keyword in col.upper() for keyword in ['PK', 'PENAL', 'PENALTY'])]
+        variables_to_show.extend(pk_related)
 
-        if not coef_plot_df.empty:
-            fig = go.Figure()
+        # Se não encontrou Expected_Goals nem PK, mostrar aviso
+        if len(variables_to_show) == 1:  # Apenas Intercepto
+            st.warning("⚠️ Expected_Goals ou variáveis relacionadas a pênaltis (PK) não estão entre as variáveis selecionadas.")
+            st.info("💡 Para ver os intervalos de confiança, inclua 'Expected_Goals' ou variáveis com 'PK' na seleção de variáveis independentes.")
+        else:
+            # Filtrar o dataframe para mostrar apenas as variáveis relevantes
+            conf_int_filtered = conf_int.loc[variables_to_show]
 
-            fig.add_trace(go.Scatter(
-                x=coef_plot_df['Coeficiente'],
-                y=coef_plot_df.index,
-                mode='markers',
-                marker=dict(size=10, color='blue'),
-                error_x=dict(
-                    type='data',
-                    symmetric=False,
-                    array=coef_plot_df['Limite Superior'] - coef_plot_df['Coeficiente'],
-                    arrayminus=coef_plot_df['Coeficiente'] - coef_plot_df['Limite Inferior']
-                ),
-                name='Coeficientes com IC 95%'
-            ))
+            # Reordenar colunas
+            conf_int_filtered = conf_int_filtered[['Coeficiente', 'Limite Inferior', 'Limite Superior', 'P-valor']]
 
-            # Linha vertical em zero
-            fig.add_vline(x=0, line_dash="dash", line_color="red",
-                         annotation_text="Sem efeito")
+            st.markdown("**Mostrando intervalos de confiança apenas para Expected Goals e variáveis relacionadas a pênaltis (PK):**")
+            st.dataframe(conf_int_filtered.round(4), use_container_width=True)
 
-            fig.update_layout(
-                title="Intervalos de Confiança dos Coeficientes (95%)",
-                xaxis_title="Valor do Coeficiente",
-                yaxis_title="Variáveis",
-                height=400
-            )
+            # Gráfico dos intervalos de confiança (excluindo intercepto)
+            coef_plot_df = conf_int_filtered[conf_int_filtered.index != 'Intercepto'].copy()
 
-            st.plotly_chart(fig, use_container_width=True)
+            if not coef_plot_df.empty:
+                fig = go.Figure()
 
-        # Interpretação automática
-        significant_vars = conf_int[conf_int['P-valor'] < 0.05].index.tolist()
-        if 'Intercepto' in significant_vars:
-            significant_vars.remove('Intercepto')
+                fig.add_trace(go.Scatter(
+                    x=coef_plot_df['Coeficiente'],
+                    y=coef_plot_df.index,
+                    mode='markers',
+                    marker=dict(size=10, color='blue'),
+                    error_x=dict(
+                        type='data',
+                        symmetric=False,
+                        array=coef_plot_df['Limite Superior'] - coef_plot_df['Coeficiente'],
+                        arrayminus=coef_plot_df['Coeficiente'] - coef_plot_df['Limite Inferior']
+                    ),
+                    name='Coeficientes com IC 95%'
+                ))
 
-        if significant_vars:
-            st.markdown(f"""
-            <div class="insight-box">
-                <h4>📊 Variáveis Estatisticamente Significativas (p < 0.05):</h4>
-                <p>{', '.join(significant_vars)}</p>
-            </div>
-            """, unsafe_allow_html=True)
+                # Linha vertical em zero
+                fig.add_vline(x=0, line_dash="dash", line_color="red",
+                             annotation_text="Sem efeito")
+
+                fig.update_layout(
+                    title="Intervalos de Confiança - Expected Goals e Pênaltis (95%)",
+                    xaxis_title="Valor do Coeficiente",
+                    yaxis_title="Variáveis",
+                    height=400
+                )
+
+                st.plotly_chart(fig, use_container_width=True)
+
+            # Interpretação automática apenas para as variáveis filtradas
+            significant_vars_filtered = conf_int_filtered[conf_int_filtered['P-valor'] < 0.05].index.tolist()
+            if 'Intercepto' in significant_vars_filtered:
+                significant_vars_filtered.remove('Intercepto')
+
+            if significant_vars_filtered:
+                st.markdown(f"""
+                <div class="insight-box">
+                    <h4>📊 Variáveis Estatisticamente Significativas (p < 0.05):</h4>
+                    <p>{', '.join(significant_vars_filtered)}</p>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown("""
+                <div class="insight-box">
+                    <h4>📊 Análise de Significância:</h4>
+                    <p>Nenhuma das variáveis selecionadas (Expected_Goals/PK) apresentou significância estatística (p < 0.05).</p>
+                </div>
+                """, unsafe_allow_html=True)
 
     except Exception as e:
         st.warning(f"⚠️ Não foi possível calcular intervalos de confiança: {e}")
-
-    # Simulador de predições
-    st.subheader("Simulador de Predições")
-
-    with st.expander("Fazer Predição Personalizada"):
-        prediction_inputs = {}
-
-        for feature in selected_features:
-            min_val = float(df[feature].min())
-            max_val = float(df[feature].max())
-            mean_val = float(df[feature].mean())
-
-            prediction_inputs[feature] = st.slider(
-                f"{feature}:",
-                min_value=min_val,
-                max_value=max_val,
-                value=mean_val
-            )
-
-        if st.button("Fazer Predição"):
-            new_data = pd.DataFrame([prediction_inputs])
-            new_data_sm = sm.add_constant(new_data)
-
-            prediction = model_sm.get_prediction(new_data_sm)
-            pred_value = prediction.predicted_mean[0]
-            pred_summary = prediction.summary_frame(alpha=0.05)
-
-            ci_lower = pred_summary['obs_ci_lower'].iloc[0]
-            ci_upper = pred_summary['obs_ci_upper'].iloc[0]
-
-            st.markdown(f"""
-            <div class="success-box">
-                <h4>Resultado da Predição</h4>
-                <p><strong>Valor Predito:</strong> {pred_value:.2f}</p>
-                <p><strong>Intervalo de Confiança (95%):</strong> [{ci_lower:.2f}, {ci_upper:.2f}]</p>
-            </div>
-            """, unsafe_allow_html=True)
-
-    # Preparação dos dados
-    X = df[selected_features].fillna(df[selected_features].mean())
-
-    # Normalização
-    from sklearn.preprocessing import StandardScaler
-    from sklearn.cluster import KMeans
-
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
 
 def show_statistical_tests_advanced(df):
     """Seção avançada com múltiplos testes estatísticos"""
@@ -2002,7 +1985,27 @@ def show_team_analysis(df):
             conf_int = model_sm.conf_int()
             conf_int.columns = ['Limite Inferior', 'Limite Superior']
             conf_int.index = ['Intercepto'] + selected_features
-            st.dataframe(conf_int.round(4))
+
+            # Filtrar apenas Expected_Goals e variáveis relacionadas a pênaltis (PK)
+            variables_to_show = ['Intercepto']
+
+            # Adicionar Expected_Goals se estiver nas features selecionadas
+            if 'Expected_Goals' in conf_int.index:
+                variables_to_show.append('Expected_Goals')
+
+            # Adicionar variáveis relacionadas a pênaltis (PK)
+            pk_related = [col for col in conf_int.index if any(keyword in col.upper() for keyword in ['PK', 'PENAL', 'PENALTY'])]
+            variables_to_show.extend(pk_related)
+
+            # Se não encontrou Expected_Goals nem PK, mostrar aviso
+            if len(variables_to_show) == 1:  # Apenas Intercepto
+                st.warning("⚠️ Expected_Goals ou variáveis relacionadas a pênaltis (PK) não estão entre as variáveis selecionadas.")
+                st.info("💡 Para ver os intervalos de confiança, inclua 'Expected_Goals' ou variáveis com 'PK' na seleção de variáveis independentes.")
+            else:
+                # Filtrar o dataframe para mostrar apenas as variáveis relevantes
+                conf_int_filtered = conf_int.loc[variables_to_show]
+                st.markdown("**Mostrando intervalos de confiança apenas para Expected Goals e variáveis relacionadas a pênaltis (PK):**")
+                st.dataframe(conf_int_filtered.round(4))
 
 def show_hypothesis_testing(df):
     """Testes de hipóteses"""
