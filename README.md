@@ -8,82 +8,106 @@ Aplicar técnicas de análise estatística e de dados para explorar o dataset de
 
 ### 📁 **Arquivos Principais:**
 
-- `index.ipynb` - Notebook com análise detalhada e documentação completa
-- `dashboard_final.py` - Dashboard interativo com todas as funcionalidades avançadas
-- `dataset.csv` - Dataset dos jogadores da Premier League (574 observações)
-- `requirements.txt` - Dependências do projeto
+- `dashboard_final.py` - Dashboard interativo completo e otimizado
+- `dashboard_simples.py` - Versão simplificada focada nos requisitos mínimos
+- `dataset.csv` - Dataset dos jogadores da Premier League (574+ observações)
+- `config.py` - Configurações centralizadas do projeto
+- `requirements.txt` - Dependências atualizadas do projeto
 - `README.md` - Documentação completa do projeto
+- `index.ipynb` - Notebook com análise detalhada (opcional)
 
 ## 🚀 **Como Executar o Dashboard**
 
 ### Pré-requisitos
+
 ```bash
+# Instalar dependências completas
 pip install -r requirements.txt
 ```
 
-### Executando o Dashboard
+### Executando o Dashboard Principal (Completo)
+
 ```bash
 streamlit run dashboard_final.py
 ```
 
+### Executando o Dashboard Simplificado (Acadêmico)
+
+```bash
+streamlit run dashboard_simples.py
+```
+
 O dashboard será aberto automaticamente no seu navegador em `http://localhost:8501`
+
+> 💡 **Dica**: Use o dashboard_simples.py para apresentações acadêmicas focadas nos requisitos da lauda, e o dashboard_final.py para análises mais aprofundadas.
 
 ## 🎛️ **Funcionalidades do Dashboard**
 
 ### 🏠 **Dashboard Principal**
+
 - Métricas gerais do dataset e estatísticas descritivas
 - Filtros avançados por posição, minutos jogados e gols
 - Distribuição por posições com gráficos interativos
 
-### 🔍 **Análise Exploratória** 
+### 🔍 **Análise Exploratória**
+
 - Top performers (artilheiros e assistentes)
 - Matriz de correlações interativa
 - Análise por posições com insights automáticos
 
 ### 📈 **Modelagem Estatística**
+
 - Regressão Linear e Random Forest interativos
 - Métricas de performance (R², RMSE, MAE)
 - Intervalos de confiança (95%)
 - Feature importance e interpretação automática
 
 ### 🤖 **ML Avançado**
+
 - Comparação de 5 algoritmos diferentes
 - Análise de overfitting
 - Visualizações de performance
 - Seleção automática do melhor modelo
 
 ### 🔍 **Clustering**
+
 - K-means para agrupamento de jogadores
 - Visualização PCA dos clusters
 - Análise detalhada de grupos similares
 
 ### 🧪 **Testes Estatísticos Avançados**
+
 - Correlações (Pearson vs Spearman)
 - Testes de normalidade
 - Comparação de grupos (t-test, Mann-Whitney)
 - ANOVA e análise de homocedasticidade
 
 ### 🥊 **Comparação de Jogadores**
+
 - Interface head-to-head entre jogadores
 - Gráfico radar de performance
 - Insights automáticos das diferenças
 
 ### 🏟️ **Análise por Times**
+
 - Estatísticas completas por equipe
 - Rankings e identificação de destaques
 - Distribuição por posições
 
 ### 🧪 **Testes de Hipóteses**
+
 - Três testes estatísticos principais
 - Análise ANOVA detalhada
 - Interpretação automática dos resultados
 
 ### 📊 **Visualizações**
+
 - Gráficos especializados e interativos
 - Análise de distribuições
 - Comparações visuais avançadas
 
 ### 💡 **Insights e Soluções**
+
 - Descobertas automáticas
 - Recomendações baseadas em dados
 - Soluções práticas para o contexto esportivo
